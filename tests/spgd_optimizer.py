@@ -67,6 +67,8 @@ atmosphere = MultiLayerAtmosphere(layers, False)
 wf_tel = Wavefront(tel_aperture(tel_pupil_grid), wavelength)
 atms_time = 1
 atmosphere.evolve_until(atms_time)
+atms_time += 1
+atmosphere.evolve_until(atms_time)
 wfatms_tel = atmosphere.forward(wf_tel)
 
 ## Demagnify wavefront and phase-screen for the optics
@@ -227,9 +229,9 @@ sci_img1 = sci_img.copy()
 phasescreens = []
 phasescreens.append(wfatms.copy())
 # Now run the loop while tracking atmospheric changes
-for opt_loop in np.arange(4000):
+for opt_loop in np.arange(5e4):
     # Update the atmospheric turbulence
-    if opt_loop % 1000 == 0:
+    if opt_loop % 100 == 0:
         print("Phasescreen changes\n")
         atms_time += 1
         atmosphere.evolve_until(atms_time)
@@ -246,7 +248,7 @@ for opt_loop in np.arange(4000):
     # Science optical path here
     ncp_wf = ncp.forward(dm_wf)
     app_wf = app.forward(ncp_wf)
-    science_camera.integrate(prop(app_wf), dt=1e-3)
+    science_camera.integrate(prop(app_wf), dt=1e-2)
     
     # Wavefront sensor optical path here
     # Implement spatial filter to simulate reconstructed wavefront
@@ -281,7 +283,7 @@ for opt_loop in np.arange(4000):
     
     modes_evolution.append(dm.actuators.copy())
     
-    if opt_loop % 100 == 0:
+    if opt_loop % 10 == 0:
         print("Tracking loop {0}: Calculated strehl: {1:.4f} contrast: {2:.4E} cost: {3:.4E}\n"\
               .format(opt_loop, test_strehl, test_contrast, merit))
                 
