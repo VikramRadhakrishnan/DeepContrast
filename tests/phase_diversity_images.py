@@ -4,7 +4,7 @@
 Created on Wed Jan 23 13:08:36 2019
 
 Code to simulate a coronagraphic high contrast imaging instrument, with NCPA.
-The AO system runs at 1kHz and the focal plane cameras are read out at 1/3 Hz.
+The AO system runs at 1kHz and the focal plane cameras are read out at 1 Hz.
 There are two focal plane images, that differ by a known phase aberration.
 The goal is to use phase diversity techniques to estimate the NCPA.
 
@@ -53,7 +53,6 @@ height = 0
 
 # Make atmosphere
 np.random.seed(42)
-#layers = [InfiniteAtmosphericLayer(tel_pupil_grid, Cn_squared_from_fried_parameter(r0, 500e-9), L0, velocity * tel_pupil_grid.delta[0], height, 2)]
 layers = []
 layer = InfiniteAtmosphericLayer(tel_pupil_grid, Cn_squared_from_fried_parameter(r0, 500e-9), L0, velocity * tel_pupil_grid.delta[0], height, 2)
 layer2 = ModalAdaptiveOpticsLayer(layer, dm.influence_functions, 1)
@@ -62,6 +61,7 @@ atmosphere = MultiLayerAtmosphere(layers, False)
 
 # Make initial phasescreen
 wf_tel = Wavefront(tel_aperture(tel_pupil_grid), wavelength)
+wf_tel.total_power = 1
 atms_time = 1
 atmosphere.evolve_until(atms_time)
 atms_time += 1
@@ -103,13 +103,6 @@ diversity_camera = NoiselessDetector()
 ## Create a spatial filter
 filt_aperture = circular_aperture(25)
 spatial_filter = Apodizer(filt_aperture(science_focal_grid))
-
-## Create the Shack-Hartmann Wavefront sensor
-F_mla = 40. / 0.3
-N_mla = 22
-D_mla = 10.5e-3
-shwfs = SquareShackHartmannWavefrontSensorOptics(pupil_grid, F_mla, N_mla, D_mla)
-shwfse = ShackHartmannWavefrontSensorEstimator(shwfs.mla_grid, shwfs.micro_lens_array.mla_index)
 
 ## Generate a diffraction limited image for metrics
 diff_lim_img = prop(wf).power
@@ -161,3 +154,11 @@ for phasescreen in np.arange(duration):
 
 sci_img = science_camera.read_out()
 div_img = diversity_camera.read_out()
+
+# Images to test phase diversity phase retrieval
+test_img = prop(ncp.forward(wf)).power
+test_div_img = prop(diversity.forward(ncp.forward(wf))).power
+
+# Parameters for the model
+zero_phase = np.zeros(app_phase.shape)
+transmitter = Apodizer(np.exp(1j * zero_phase))
