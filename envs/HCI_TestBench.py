@@ -110,12 +110,20 @@ class HCI_TestBench(gym.Env):
       wf = self._demag.forward(wf)
       return wf
     
-    def _wfs_forward(self, phase):
+    def _wfs_forward(self):
       '''For now we will hack this to just take the provided wavefront and
       project it on the DM actuator basis
       '''
       if self._wfs == None:
-        dm_surface = phase / (-2 * self._wavefront.wavenumber)
+        # First get the phase from the turbulence generator
+        phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
+        
+        # Then apply the phase addition from the DM
+        measured_phase = phase + 2 * self._wavefront.wavenumber * self._dm.surface
+
+        # To convert this to actuator space, first convert the phase into a corresponding DM surface
+        dm_surface = measured_phase / (-2 * self._wavefront.wavenumber)
+
         coeffs = np.dot(self._inverse_tm, dm_surface)
 
       return coeffs
@@ -147,6 +155,7 @@ class HCI_TestBench(gym.Env):
       '''
       
       # Clip the DM actuators to +/- max stroke
+      action += self._dm.actuators.copy()
       action = np.clip(action, -self._actstroke, self._actstroke)
       self._dm.actuators = action
       
@@ -164,8 +173,7 @@ class HCI_TestBench(gym.Env):
 
       # Wavefront sensor optical path
       # For now we are going to hack this because WFS is complicated to get to work
-      phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
-      self._wfs_phase_acts = self._wfs_forward(phase)
+      self._wfs_phase_acts = self._wfs_forward()
 
       wfs_meas_reshaped = np.reshape(self._wfs_phase_acts, (self._dm_actside, self._dm_actside))
       dm_acts_reshaped = np.reshape(self._dm.actuators.copy(), (self._dm_actside, self._dm_actside))
@@ -191,8 +199,7 @@ class HCI_TestBench(gym.Env):
       self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
       self._img = self._sci_cam.read_out() # Focal plane image
 
-      phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
-      self._wfs_phase_acts = self._wfs_forward(phase)
+      self._wfs_phase_acts = self._wfs_forward()
 
       wfs_meas_reshaped = np.reshape(self._wfs_phase_acts, (self._dm_actside, self._dm_actside))
       dm_acts_reshaped = np.reshape(self._dm.actuators.copy(), (self._dm_actside, self._dm_actside))
@@ -206,8 +213,7 @@ class HCI_TestBench(gym.Env):
       self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
       self._img = self._sci_cam.read_out() # Focal plane image
 
-      phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
-      wf_acts = self._wfs_forward(phase)
+      wf_acts = self._wfs_forward()
       
       obs = {"measured_coeffs":wf_acts, "image_pixels":self._img}
       return obs
@@ -220,4 +226,3 @@ class HCI_TestBench(gym.Env):
 
     def close(self):
         if self.viewer: self.viewer.close()
-
