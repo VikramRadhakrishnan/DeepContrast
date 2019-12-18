@@ -4,15 +4,37 @@
 Created on Wed Jun 13 22:06:27 2018
 
 @author: vikram
+
+Propagation through the atmosphere and telescope optics:
+    --> Turbulence generator
+    --> Demagnifier
+    --> Deformable mirror
+
+Propagation through the wavefront sensor optics:
+    --> Wavefront sensor optics
+
+Read wavefront sensor data (HACKED FOR SIMPLICTY):
+    --> Integrate on wavefront sensor camera
+    --> Readout wavefront sensor
+
+Propagation through the science camera optics:
+    --> Upstream non common path aberration
+    --> Coronagraph(s)
+    --> Downstream non common path aberration
+
+Read science camera data:
+    --> Integrate on science camera
+    --> Readout science camera
 """
+
+# Necessary imports
 import gym
-from hcipy import *
-from hcipy.atmosphere import *
+from gym import spaces
+from gym.utils import seeding
 import numpy as np
+from hcipy import *
 import matplotlib.pyplot as plt
 from astropy.io import fits
-import os, glob
-import time
 import pickle
 
 def save_object(obj, filename):
@@ -22,140 +44,179 @@ def save_object(obj, filename):
 
 class HCI_TestBench(gym.Env):
     
-    def __init__(self, turbulence_generator, dm, wfs_optics, prop, coronagraph, wfs_cam, sci_cam):
-        '''Variables used to characterize testbench
-        turbulence_generator: optical component to add phase and amplitude aberrations
-        dm: deformable mirror component
-        wfs_optics: optical components placed in the wavefront sensor optical path
-        prop: propagator from pupil plane to focal plane
-        coronagraph: coronagraph optic
-        wfs_cam: wavefront sensor camera detector
-        sci_cam: science camera detector
-        '''
-        self._turbulence_generator = turbulence_generator
-        self._dm = dm
-        self._wfs_optics = wfs_optics
-        self._prop = prop
-        self._coronagraph = coronagraph
-        self._wfs_cam = wfs_cam
-        self._sci_cam = sci_cam
-        
-        
-        self._timestep = 0
-        
-        self._act_stroke = 10e-6 #10 micron stroke is the maximum allowed
-        
-        self._action_space = spaces.Box(-1., 1., shape=(len(dm.influence_functions),), dtype='float32')
-        self._observation_space = spaces.Dict(dict(
-            measured_slopes=spaces.Box(-np.inf, np.inf, shape=obs['measured_slopes'].shape, dtype='float32'),
-            image_pixels=spaces.Box(0, 255, shape=obs['image_pixels'].shape, dtype='float32')
-        ))
+    def __init__(self, wavefront, turbulence_generator, demag, dm, wfs, ncp, coronagraph, prop, sci_cam, dh_ind):
+      '''Variables used to characterize testbench -
+      wavefront: the wavefront, characterized by the aperture function
+      turbulence_generator: optical component to add evolving phase and/or amplitude aberrations
+      demag: demagnifier to bring the wavefront down to the diameter of the instrument optics
+      dm: deformable or/and movable mirror component
+      wfs: optical elements in a separate optical path downstream of DM, for wavefront sensing
+      ncp: non common path aberration taken here to be a separate apodizer
+      coronagraph: pupil plane coronagraph optic
+      prop: propagator from pupil plane to focal plane
+      sci_cam: science camera detector
+      dh_ind: indices of pixels within dark hole region that must be kept dark
+      '''
+      self._wavefront = wavefront
+      self._turbulence_generator = turbulence_generator
+      self._demag = demag
+      self._dm = dm
+      self._wfs = wfs
+      self._ncp = ncp
+      self._coronagraph = coronagraph
+      self._prop = prop
+      self._sci_cam = sci_cam
+      self._dh_ind = dh_ind
 
-        self.seed()
+      self._inverse_tm = inverse_tikhonov(dm.influence_functions.transformation_matrix.toarray(), rcond=1e-7)
+
+      self._dm_actside = int(round(np.sqrt(len(self._dm.actuators))))
+      
+      self._timestep = 1 # A unit of time (let's say milliseconds)
+      
+      self._actstroke = 2e-6 # 2 micron stroke is the maximum allowed
+      
+      # Calculate the diffraction limited science image for Strehl calculations
+      diff_lim_img = self._prop(self._demag.forward(self._wavefront)).power
+
+      self._dlmax = np.argmax(diff_lim_img) # Used in Strehl calculation or metric calculation
+      
+      self._action_space = spaces.Box(-self._actstroke, self._actstroke, shape=self._dm.actuators.shape, dtype='float64')
+      self._observation_space = spaces.Dict(dict(
+          measured_slopes=spaces.Box(-self._actstroke, self._actstroke, shape=self._dm.actuators.shape, dtype='float64'),
+          image_pixels=spaces.Box(0, np.inf, shape=diff_lim_img.shape, dtype='float64')
+      ))
+
+      self.seed()
+      self.reset()
     
     @property
     def action_space(self):
-        return self._action_space
+      return self._action_space
     
     @property
     def observation_space(self):
-        return self._observation_space
+      return self._observation_space
 
     def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
-        return [seed]
+      self.np_random, seed = seeding.np_random(seed)
+      return [seed]
     
-    def atms_forward(self, wavefront):
-        wf = wavefront.copy()
-        self.turbulence_generator.evolve_until(self.timestep)
-        wf = self.turbulence_generator.forward(wf)
-        return wf
+    def _turbulence(self, wf):
+      '''Propagate a wavefront through the turbulence generator (atmosphere).
+      turb --> demagnify
+      '''
+      wf = self._turbulence_generator.forward(wf)
+      wf = self._demag.forward(wf)
+      return wf
     
-    def wfs_forward(self, wavefront):
-        wf = wavefront.copy()
-        wf = self.dm.forward(wf)
-        wf = self.wfs_optics.forward(wf)
-        return wf
-    
-    def wfs_backward(self, wavefront):
-        wf = wavefront.copy()
-        wf = self.wfs_optics.backward(wf)
-        wf = self.dm.backward(wf)
-        return wf
-    
-    def forward(self, wavefront):
-        wf = wavefront.copy()
-        wf = self.dm.forward(wf)
-        wf = self.coronagraph.forward(wf)
-        wf = self.prop(wf)
-        return wf
-    
-    def backward(self, wavefront):
-        wf = wavefront.copy()
-        wf = self.coronagraph.backward(wf)
-        wf = self.dm.backward(wf)
-        return wf
-    
-    def wfs_readout(self, wavefront, dt=1, weight=1):
-        wf = wavefront.copy()
-        self.wfs_cam.integrate(wf, dt, weight)
-        wfs_img = self.wfs_cam.read_out()
-        wfs_img = wf.power
-        return wfs_img
-    
-    def sci_cam_readout(self, wavefront, dt=1, weight=1):
-        wf = wavefront.copy()
-        self.sci_cam.integrate(wf, dt, weight)
-        sci_img = self.sci_cam.read_out()
-        sci_img = wf.power
-        return sci_img
+    def _wfs_forward(self, phase):
+      '''For now we will hack this to just take the provided wavefront and
+      project it on the DM actuator basis
+      '''
+      if self._wfs == None:
+        dm_surface = phase / (-2 * self._wavefront.wavenumber)
+        coeffs = np.dot(self._inverse_tm, dm_surface)
 
-    def step(self, wavefront):
-        wfatms = atms_forward(wavefront)
-        
-        # Wavefront sensor optical path
-        wf_wfs = wfatms.copy()
-        wf_wfs = wfs_forward(wf_wfs)
-        wfs_slopes = 
-        
-        self.timestep += 1
-        return self._get_obs(), -costs, False, {}
+      return coeffs
+
+    def _forward(self, wf):
+      '''Propagate a wavefront through the optics.
+      DM --> NCPA --> Coronagraph --> focal plane
+      '''
+      wf = self._dm.forward(wf)
+      wf = self._ncp.forward(wf)
+      wf = self._coronagraph.forward(wf)
+      wf = self._prop(wf)
+      return wf
+
+    def _calc_contrast(self):
+      return self._img[self._dh_ind].mean() / self._img[self._dlmax]
+
+    def step(self, action):
+      '''Step through the environment. Performs the following:
+      1. Sets the DM actuators.
+      2. Propagate WF through the wavefront sensor optics.
+      3. Calculate the measured slopes.
+      4. Propagate through science camera optics.
+      5. Integrate on science camera.
+      6. Every N timesteps, read the wavefront sensor camera and update the obs.
+      7. Calculate strehl or contrast etc and create the reward.
+      8. Return observation space, reward, done, and info.
+      9. Increment timestep.
+      '''
+      
+      # Clip the DM actuators to +/- max stroke
+      action = np.clip(action, -self._actstroke, self._actstroke)
+      self._dm.actuators = action
+      
+      # Science optical path
+      self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
+      self._img = self._sci_cam.read_out()
+
+      # Reward is the negative log of contrast
+      reward = -np.log10(self._calc_contrast())
+
+      done = reward <= 2
+      
+      # Now that the previous phase was corrected by the DM, increment the turbulence generator for next state
+      self._turbulence_generator.t += self._timestep
+
+      # Wavefront sensor optical path
+      # For now we are going to hack this because WFS is complicated to get to work
+      phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
+      self._wfs_phase_acts = self._wfs_forward(phase)
+
+      wfs_meas_reshaped = np.reshape(self._wfs_phase_acts, (self._dm_actside, self._dm_actside))
+      dm_acts_reshaped = np.reshape(self._dm.actuators.copy(), (self._dm_actside, self._dm_actside))
+
+      # State is the measured wavefront in actuator space stacked with current actuator values
+      self.state = np.stack([wfs_meas_reshaped, dm_acts_reshaped])
+
+      return self.state, reward, done, {}
 
     def reset(self):
-        high = np.array([np.pi, 1])
-        self.state = self.np_random.uniform(low=-high, high=high)
-        self.last_u = None
-        return self._get_obs()
+      '''Does the following:
+      1. Reset dm actuators to defaults.
+      2. Reset turbulence generator.
+      '''
+
+      # Reset the turbulence generator
+      self._turbulence_generator.evolve_until(None)
+      # Make sure lag is accounted for
+      for loop in np.arange(0.001, 0.1, 0.001):
+        self._turbulence_generator.evolve_until(loop)
+
+      self._dm.actuators = np.zeros(len(self._dm.actuators)) # Flatten DM
+      self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
+      self._img = self._sci_cam.read_out() # Focal plane image
+
+      phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
+      self._wfs_phase_acts = self._wfs_forward(phase)
+
+      wfs_meas_reshaped = np.reshape(self._wfs_phase_acts, (self._dm_actside, self._dm_actside))
+      dm_acts_reshaped = np.reshape(self._dm.actuators.copy(), (self._dm_actside, self._dm_actside))
+
+      # State is the measured wavefront in actuator space stacked with current actuator values
+      self.state = np.stack([wfs_meas_reshaped, dm_acts_reshaped])
+      
+      return self.state
 
     def _get_obs(self):
-        theta, thetadot = self.state
-        return np.array([np.cos(theta), np.sin(theta), thetadot])
+      self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
+      self._img = self._sci_cam.read_out() # Focal plane image
 
+      phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
+      wf_acts = self._wfs_forward(phase)
+      
+      obs = {"measured_coeffs":wf_acts, "image_pixels":self._img}
+      return obs
+        
     def render(self, mode='human'):
-
-        if self.viewer is None:
-            from gym.envs.classic_control import rendering
-            self.viewer = rendering.Viewer(500,500)
-            self.viewer.set_bounds(-2.2,2.2,-2.2,2.2)
-            rod = rendering.make_capsule(1, .2)
-            rod.set_color(.8, .3, .3)
-            self.pole_transform = rendering.Transform()
-            rod.add_attr(self.pole_transform)
-            self.viewer.add_geom(rod)
-            axle = rendering.make_circle(.05)
-            axle.set_color(0,0,0)
-            self.viewer.add_geom(axle)
-            fname = path.join(path.dirname(__file__), "assets/clockwise.png")
-            self.img = rendering.Image(fname, 1., 1.)
-            self.imgtrans = rendering.Transform()
-            self.img.add_attr(self.imgtrans)
-
-        self.viewer.add_onetime(self.img)
-        self.pole_transform.set_rotation(self.state[0] + np.pi/2)
-        if self.last_u:
-            self.imgtrans.scale = (-self.last_u/2, np.abs(self.last_u)/2)
-
-        return self.viewer.render(return_rgb_array = mode=='rgb_array')
+      '''Display the state:
+      Display reconstructed wavefront and science image.
+      '''
+      raise NotImplementedError
 
     def close(self):
         if self.viewer: self.viewer.close()
