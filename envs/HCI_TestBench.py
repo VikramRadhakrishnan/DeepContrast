@@ -183,11 +183,12 @@ class HCI_TestBench(gym.Env):
 
       return self.state, reward, done, {}
 
-    def reset(self):
+    def reset(self, atmseed=None):
       '''Does the following:
       1. Reset dm actuators to defaults.
       2. Reset turbulence generator.
       '''
+      np.random.seed(atmseed)
 
       # Reset the turbulence generator
       self._turbulence_generator.evolve_until(None)
