@@ -1,4 +1,3 @@
-# TODO: your agent here!
 from model import Actor, Critic
 from noise_model import OUNoise
 from replay_buffer import ReplayBuffer
@@ -8,12 +7,12 @@ import numpy as np
 # Deep Deterministic Policy Gradients Agent
 class DDPG():
     """Reinforcement Learning agent that learns using DDPG."""
-    def __init__(self, task):
-        self.task = task
-        self.state_size = task.state_size
-        self.action_size = task.action_size
-        self.action_low = task.action_low
-        self.action_high = task.action_high
+    def __init__(self, env):
+        self.env = env
+        self.state_size = env.observation_space.shape[0]
+        self.action_size = env.action_space.shape[0]
+        self.action_low = env.action_space.low
+        self.action_high = env.action_space.high
         
         self.actor_lr = 0.0001
         self.critic_lr = 0.001
