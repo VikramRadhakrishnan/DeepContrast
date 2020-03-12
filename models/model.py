@@ -1,5 +1,4 @@
 import tensorflow as tf
-from tensorflow import keras.backend as K
 
 # Actor model defined using Keras
 
@@ -47,7 +46,7 @@ class Actor:
             name='raw_actions')(net)
 
         # Scale [-1, 1] output for each action dimension to proper range
-        actions = tf.keras.layers.multiply(raw_actions, action_range/2)
+        actions = raw_actions * self.action_range/2
 
         # Create Keras model
         self.model = tf.keras.Model(inputs=states, outputs=actions)
