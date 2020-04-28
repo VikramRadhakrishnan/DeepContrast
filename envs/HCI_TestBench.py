@@ -12,16 +12,20 @@ from hcipy import *
 import matplotlib.pyplot as plt
 from astropy.io import fits
 import pickle
+import os
+
+from utils.shack_hartmann_calibrator import shack_hartmann_calibrator
 
 class HCI_TestBench(gym.Env):
     
-    def __init__(self, wavefront, timestep, turbulence_generator, demag, dm, wfs, ncp, coronagraph, prop, sci_cam, dh_ind):
+    def __init__(self, wavefront, timestep, turbulence_generator, demag, dm, wfs, wfse, ncp, coronagraph, prop, sci_cam, dh_ind):
         '''Variables used to characterize testbench -
-        wavefront: the wavefront, characterized by the aperture function
+        wavefront: the flat wavefront, characterized by the aperture function
         turbulence_generator: optical component to add evolving phase and/or amplitude aberrations
         demag: demagnifier to bring the wavefront down to the diameter of the instrument optics
         dm: deformable or/and movable mirror component
         wfs: optical elements in a separate optical path downstream of DM, for wavefront sensing
+        wfse: estimator for the wavefront sensor
         ncp: non common path aberration taken here to be a separate apodizer
         coronagraph: pupil plane coronagraph optic
         prop: propagator from pupil plane to focal plane
@@ -35,6 +39,7 @@ class HCI_TestBench(gym.Env):
         self._demag = demag
         self._dm = dm
         self._wfs = wfs
+        self._wfse = wfse
         self._ncp = ncp
         self._coronagraph = coronagraph
         self._prop = prop
@@ -53,9 +58,23 @@ class HCI_TestBench(gym.Env):
         self._diff_lim_img = self._prop(self._demag.forward(self._wavefront)).power
 
         self._dlmax = np.argmax(self._diff_lim_img) # Used in Strehl calculation or metric calculation
+
+        # Calibrate the WFS or use a pre-calibrated control matrix
+        if os.path.exists("control_mat.npy"):
+            print("Loading pre-calibrated control matrix")
+            self._control_mat = np.load("control_mat.npy")
+        else:
+            print("Calibrating control matrix\n")
+            wfs_infmat = shack_hartmann_calibrator(wf, wfs, wfse, dm, 0.01e-6, prop, None)
+            self._control_mat = inverse_tikhonov(wfs_infmat.transformation_matrix, rcond=2e-2)
+            np.save("control_mat", self._control_mat)
+
+        # Flat wavefront lenslet measurements for reference
+        ref_img = self._wfs.forward(self._demag.forward(self._wavefront)).power
+        self._ref_slopes = self._wfse.estimate([ref_img]).ravel()
       
         self._action_space = spaces.Box(-self._actstroke, self._actstroke, shape=(self._dm_actside, self._dm_actside), dtype='float64')
-        self._observation_space = spaces.Box(-1, 1, shape=(self._dm_actside, self._dm_actside, 2), dtype='float64')
+        self._observation_space = spaces.Box(-np.inf, np.inf, shape=(self._dm_actside, self._dm_actside, 2), dtype='float64')
     
     @property
     def action_space(self):
@@ -73,39 +92,40 @@ class HCI_TestBench(gym.Env):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
     
-    def _turbulence(self, wf):
+    def _turbulence(self):
         '''Propagate a wavefront through the turbulence generator (atmosphere).
         turb --> demagnify
         '''
-        wf = self._turbulence_generator.forward(wf)
+        wf = self._turbulence_generator.forward(self._wavefront)
         wf = self._demag.forward(wf)
         return wf
     
     def _wfs_forward(self):
-        '''For now we will hack this to just take the provided wavefront and
-        project it on the DM actuator basis
+        '''Propagate the wavefront through the wavefront sensor and project the measurements on the DM mode basis
         '''
-        if self._wfs == None:
-            # First get the phase from the turbulence generator
-            wf_phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
-        
-            # Get the phase addition from the DM
-            dm_phase = 2 * self._wavefront.wavenumber * self._dm.surface
+        # Propagate the wavefront through the turbulence and WFS
+        wfatms = self._turbulence()
+        wf = self._dm.forward(wfatms)
+        sh_img = self._wfs.forward(wf).power
 
-            # Add this to the wavefront phase
-            measured_phase = wf_phase + dm_phase
+        # Get the measured slopes
+        meas_vec = (self._wfse.estimate([sh_img])).ravel()
 
-            # Project this to actuator space
-            measured_surface = measured_phase / (-2 * self._wavefront.wavenumber)
-            coeffs = np.dot(self._inverse_tm, measured_surface)
+        # Calculate the DM amplitudes
+        amplitudes = self._control_mat.dot(meas_vec-self._ref_slopes)
 
-        return coeffs
+        # Remove piston by subtracting the mean amplitude
+        amplitudes -= np.mean(amplitudes)
 
-    def _forward(self, wf):
+        # The amplitudes to put on the DM are the negative of these amplitudes
+        return -amplitudes.copy()
+
+    def _forward(self):
         '''Propagate a wavefront through the optics.
         DM --> NCPA --> Coronagraph --> focal plane
         '''
-        wf = self._dm.forward(wf)
+        wfatms = self._turbulence()
+        wf = self._dm.forward(wfatms)
         wf = self._ncp.forward(wf)
         wf = self._coronagraph.forward(wf)
         wf = self._prop(wf)
@@ -134,14 +154,14 @@ class HCI_TestBench(gym.Env):
         action = action.clip(-1, 1)
         action *= 1e-6
 
-        # Add this to the DM actuator values
+        # Put this on the DM 
         action = action.reshape(-1,)
         assert action.shape == self._dm.actuators.shape, "Action shape does not match DM"
 
         self._dm.actuators = action.copy()
       
         # Science optical path
-        self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
+        self._sci_cam.integrate(self._forward(), dt=1)
         self._img = self._sci_cam.read_out()
 
         # Reward is the negative log of contrast
@@ -149,7 +169,7 @@ class HCI_TestBench(gym.Env):
         strehl = self._calc_strehl()
 
         # If the contrast is below a threshold we stop
-        done = strehl <= 1e-4
+        done = strehl <= 1e-6
 
         reward = strehl
       
@@ -157,10 +177,7 @@ class HCI_TestBench(gym.Env):
         self._turbulence_generator.t += self._timestep
 
         # Wavefront sensor optical path
-        # For now we are going to hack this because WFS is complicated to get to work
         self._wfs_phase_acts = self._wfs_forward()
-
-        self._wfs_phase_acts -= np.mean(self._wfs_phase_acts) # remove piston
 
         state_vector = np.concatenate((self._wfs_phase_acts.copy().reshape((self._dm_actside, self._dm_actside, -1)),
                                        self._dm.actuators.copy().reshape((self._dm_actside, self._dm_actside, -1))), axis=-1)
@@ -188,9 +205,8 @@ class HCI_TestBench(gym.Env):
 
         self._dm.actuators = np.zeros(self._dm.actuators.shape) # Reset DM
         self._wfs_phase_acts = self._wfs_forward() # Calculate wavefront flattening actuators
-        self._wfs_phase_acts -= np.mean(self._wfs_phase_acts) # remove piston
 
-        self._sci_cam.integrate(self._forward(self._turbulence(self._wavefront)), dt=1)
+        self._sci_cam.integrate(self._forward(), dt=1)
         self._img = self._sci_cam.read_out() # Focal plane image
         
         # From here on the controller keeps trying to improve contrast until it goes below a threshold.
