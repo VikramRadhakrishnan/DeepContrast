@@ -3,13 +3,14 @@ import numpy as np
 from tensorflow.keras.layers import Dense, Input, Conv2D, Concatenate, BatchNormalization, Activation, Flatten
 from tensorflow.keras import Model
 from tensorflow.keras import regularizers
+from tensorflow.keras.initializers import RandomUniform
 
 tf.keras.backend.set_floatx('float64')
 
 # Actor model defined using Keras
 
 class Actor:
-    """Deep Q Model."""
+    """Actor (Policy) Model."""
 
     def __init__(self, state_size, action_size, name="Actor"):
         """Initialize parameters.
@@ -36,10 +37,14 @@ class Actor:
 
         # Input layer is 25x25x2
         net = Conv2D(8, (3, 3), strides=(1, 1), activation='relu', padding='same', kernel_initializer='glorot_uniform')(states)
-        net = BatchNormalization(fused=False)(net)
+        #net = BatchNormalization(fused=False)(net)
+        #net = Conv2D(16, (3, 3), strides=(1, 1), activation='relu', padding='same', kernel_initializer='glorot_uniform')(net)
+        #net = BatchNormalization(fused=False)(net)
+        #net = Conv2D(32, (3, 3), strides=(1, 1), activation='relu', padding='same', kernel_initializer='glorot_uniform')(net)
+        #net = BatchNormalization(fused=False)(net)
 
         # Now 25x25x8
-        actions = Conv2D(1, (3, 3), strides=(1, 1), activation='tanh', padding='same', kernel_initializer='glorot_uniform')(net)
+        actions = Conv2D(1, (3, 3), strides=(1, 1), activation='tanh', padding='same', kernel_initializer=RandomUniform(-5e-4, 5e-4), kernel_regularizer=regularizers.l2(0.0001))(net)
 
         # Create Keras model
         self.model = Model(inputs=states, outputs=actions, name=self.name)
@@ -84,9 +89,11 @@ class Critic:
 
         # Add more layers to the combined network
         net = Conv2D(8, (3, 3), strides=(1, 1), activation='relu', padding='same', kernel_initializer='glorot_uniform')(net)
-        net = BatchNormalization(fused=False)(net)
+        #net = BatchNormalization(fused=False)(net)
+        #net = Conv2D(16, (3, 3), strides=(1, 1), activation='relu', padding='same', kernel_initializer='glorot_uniform')(net)
+        #net = BatchNormalization(fused=False)(net)
         net = Conv2D(8, (3, 3), strides=(2, 2), activation='relu', padding='same', kernel_initializer='glorot_uniform')(net)
-        net = BatchNormalization(fused=False)(net)
+        #net = BatchNormalization(fused=False)(net)
 
         # Flatten to 1D
         net = Flatten()(net) 

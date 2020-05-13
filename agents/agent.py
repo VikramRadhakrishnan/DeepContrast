@@ -1,6 +1,6 @@
-from model import Actor, Critic
-from noise_model import OUNoise, GaussianNoise
-from replay_buffer import ReplayBuffer
+from models.model import Actor, Critic
+from utils.noise_model import OUNoise, GaussianNoise
+from utils.replay_buffer import ReplayBuffer
 
 import tensorflow as tf
 from tensorflow.keras.optimizers import Adam
@@ -12,7 +12,7 @@ import numpy as np
 class DDPG():
     """Reinforcement Learning agent that learns using DDPG."""
     def __init__(self, state_size, action_size, actor_lr, critic_lr,
-                 random_seed, mu, sigma, buffer_size, batch_size,
+                 random_seed, mu, theta, sigma, buffer_size, batch_size,
                  epsilon_start, epsilon_min, epsilon_decay,
                  gamma, tau, n_time_steps, n_learn_updates, device):
 
@@ -56,6 +56,8 @@ class DDPG():
         # Device
         self.device = device
 
+        tf.keras.backend.clear_session()
+
     def reset(self):
         """Reset the agent."""
         self.noise.reset()
@@ -64,6 +66,9 @@ class DDPG():
         """Save experience in replay memory, and use random sample from buffer to learn."""
         # Save experience / reward
         self.memory.add(state[:], action[:], reward, next_state[:], done)
+
+        if done:
+            self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
         
         if time_step % self.n_time_steps != 0:
             return
@@ -83,7 +88,7 @@ class DDPG():
         action = action.numpy()[0]
 
         if add_noise:
-            action += np.random.normal(scale=0.1, size=action.shape) * self.epsilon
+            action += np.random.normal(0.0, 0.1, action.shape) * self.epsilon
 
         # Clip action between +1 and -1
         action = action.clip(-1, 1)
@@ -105,16 +110,17 @@ class DDPG():
             experiences : tuple of (s, a, r, s', done) tuples 
             gamma (float): discount factor
         """
-        self._learn_tf(experiences, tf.constant(self.gamma, dtype=tf.float64))
+        return self._learn_tf(experiences, tf.constant(self.gamma, dtype=tf.float64))
 
     @tf.function
     def _learn_tf(self, experiences, gamma):
         states, actions, rewards, next_states, dones = experiences
-        rewards = tf.expand_dims(rewards, axis=1)
+        rewards = tf.expand_dims(rewards, 1)
         dones = tf.expand_dims(dones, 1)
 
         # ---------------------------- update critic ---------------------------- #
         with tf.GradientTape() as tape:
+            tape.watch(self.critic_local.model.trainable_variables)
             # Get predicted next-state actions and Q values from target models
             actions_next = self.actor_target.model(next_states)
             Q_targets_next = self.critic_target.model([next_states, actions_next])
@@ -127,25 +133,24 @@ class DDPG():
         
         # Minimize the loss
         critic_grad = tape.gradient(critic_loss, self.critic_local.model.trainable_variables)
+
         self.critic_optimizer.apply_gradients(zip(critic_grad, self.critic_local.model.trainable_variables))
 
         # ---------------------------- update actor ---------------------------- #
         with tf.GradientTape() as tape:
+            tape.watch(self.actor_local.model.trainable_variables)
             # Compute actor loss
             actions_pred = self.actor_local.model(states)
             actor_loss = -tf.reduce_mean(self.critic_local.model([states, actions_pred]))
 
         # Minimize the loss
         actor_grad = tape.gradient(actor_loss, self.actor_local.model.trainable_variables)
+
         self.actor_optimizer.apply_gradients(zip(actor_grad, self.actor_local.model.trainable_variables))
 
         # ----------------------- update target networks ----------------------- #
         self.soft_update(self.critic_local.model, self.critic_target.model, self.tau)
         self.soft_update(self.actor_local.model, self.actor_target.model, self.tau)
-
-        # ----------------------- decay noise ----------------------- #
-        if self.epsilon > self.epsilon_min:
-            self.epsilon -= self.epsilon_decay
 
     def soft_update(self, local_model, target_model, tau):
         """Soft update model parameters.
