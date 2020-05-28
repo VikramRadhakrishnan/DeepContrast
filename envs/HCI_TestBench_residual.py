@@ -18,7 +18,7 @@ from utils.shack_hartmann_calibrator import shack_hartmann_calibrator
 
 class HCI_TestBench(gym.Env):
     
-    def __init__(self, wavefront, timestep, turbulence_generator, demag, dm, wfs, wfse, ncp, coronagraph, prop, sci_cam, dh_ind, rwrd_func):
+    def __init__(self, wavefront, timestep, turbulence_generator, demag, dm, mask, wfs, wfse, ncp, coronagraph, prop, sci_cam, dh_ind, rwrd_func):
         '''Variables used to characterize testbench -
         wavefront: the flat wavefront, characterized by the aperture function
         turbulence_generator: optical component to add evolving phase and/or amplitude aberrations
@@ -39,6 +39,7 @@ class HCI_TestBench(gym.Env):
         self._turbulence_generator = turbulence_generator
         self._demag = demag
         self._dm = dm
+        self._mask = mask
         self._wfs = wfs
         self._wfse = wfse
         self._ncp = ncp
@@ -48,7 +49,7 @@ class HCI_TestBench(gym.Env):
         self._dh_ind = dh_ind
         self._rwrd_func = rwrd_func
 
-        self._inverse_tm = inverse_tikhonov(dm.influence_functions.transformation_matrix.toarray(), rcond=1e-7)
+        self._inverse_tm = inverse_tikhonov(dm.influence_functions.transformation_matrix.toarray(), rcond=1e-4)
 
         self._dm_actside = int(round(np.sqrt(len(self._dm.actuators))))
       
@@ -108,22 +109,24 @@ class HCI_TestBench(gym.Env):
     def _wfs_forward(self):
         '''Propagate the wavefront through the wavefront sensor and project the measurements on the DM mode basis
         '''
-        # Propagate the wavefront through the turbulence and WFS
-        wfatms = self._turbulence()
-        wf = self._dm.forward(wfatms)
-        sh_img = self._wfs.forward(wf).power
+        phase = self._turbulence_generator.phase_for(self._wavefront.wavelength)
+        phase = Field(phase, self._wavefront.grid)
+        phase -= np.mean(phase[self._wavefront.power > 0])
+        phase.grid = phase.grid.scaled(self._demag.magnification)
+        
+        # Then apply the phase addition from the DM
+        measured_phase = phase + 2 * self._wavefront.wavenumber * self._dm.surface
 
-        # Get the measured slopes
-        meas_vec = (self._wfse.estimate([sh_img])).ravel()
+        # To convert this to actuator space, first convert the phase into a corresponding DM surface
+        dm_surface = measured_phase / (-2 * self._wavefront.wavenumber)
 
-        # Calculate the DM amplitudes
-        amplitudes = self._control_mat.dot(meas_vec-self._ref_slopes)
-
-        # Remove piston by subtracting the mean amplitude
+        amplitudes = np.dot(self._inverse_tm, dm_surface)
+        amplitudes *= self._mask
+        
         amplitudes -= np.mean(amplitudes)
 
         # The amplitudes to put on the DM are the negative of these amplitudes
-        return -amplitudes.copy()
+        return amplitudes.copy()
 
     def _forward(self):
         '''Propagate a wavefront through the optics.
@@ -154,18 +157,21 @@ class HCI_TestBench(gym.Env):
         8. Return observation space, reward, done, and info.
         9. Increment timestep.
         '''
+        # Flatten actuator vector 
+        action = action.reshape(-1,)
+        assert action.shape == self._dm.actuators.shape, "Action shape does not match DM"
+        action *= self._mask # Only select actuators that are within the aperture
+
         # Subtract any piston from the action
         action -= np.mean(action)
         # The action is in units of microns, so convert this to standard units first
         action = action.clip(-1, 1)
-        #action *= self._rads_to_meters
-        action *= 1e-6
-
-        # Put this on the DM 
-        action = action.reshape(-1,)
-        assert action.shape == self._dm.actuators.shape, "Action shape does not match DM"
+        action *= self._rads_to_meters
+        #action *= 1e-6
 
         self._dm.actuators += action.copy()
+
+        #self._dm.actuators = np.clip(self._dm.actuators.copy(), -1.5e-6, 1.5e-6)
       
         # Science optical path
         self._img = self._forward().power
@@ -188,7 +194,7 @@ class HCI_TestBench(gym.Env):
         # Wavefront sensor optical path
         self._wfs_phase_acts = self._wfs_forward()
 
-        wfs_measurement = self._wfs_phase_acts.copy().reshape((self._dm_actside, self._dm_actside, -1)) * 1e6
+        wfs_measurement = self._wfs_phase_acts.copy().reshape((self._dm_actside, self._dm_actside, -1)) * self._meters_to_rads#1e6
 
         # State in actuator space measured in units of radians
         self.state = wfs_measurement
@@ -216,7 +222,7 @@ class HCI_TestBench(gym.Env):
         self._img = self._forward().power # Focal plane image
         
         # From here on the controller keeps trying to improve contrast until it goes below a threshold.
-        wfs_measurement = self._wfs_phase_acts.copy().reshape((self._dm_actside, self._dm_actside, -1)) * 1e6
+        wfs_measurement = self._wfs_phase_acts.copy().reshape((self._dm_actside, self._dm_actside, -1)) * self._meters_to_rads#1e6
 
         # State is in units of microns
         self.state = wfs_measurement
